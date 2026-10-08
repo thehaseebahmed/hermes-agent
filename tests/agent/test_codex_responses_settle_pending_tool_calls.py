@@ -397,3 +397,46 @@ def test_announced_non_function_item_precedes_pending_call():
     assert types == ["message", "function_call"], (
         f"announced message lost its leading position: {types}"
     )
+
+
+def test_done_with_rotated_item_id_confirms_pending_call_by_call_id():
+    """GitHub Copilot's /responses gives one function call a different item
+    ``id`` on ``output_item.added``, its argument deltas and ``output_item.done``;
+    only ``call_id`` is stable. The ``.done`` item must confirm the announced
+    call, or settlement adds a second copy with ``{}`` arguments, which then
+    runs and fails ("Invalid command: expected string, got NoneType")."""
+    events = [
+        SimpleNamespace(
+            type="response.output_item.added",
+            output_index=0,
+            item=SimpleNamespace(
+                type="function_call", id="fc_added", call_id="call_1", name="terminal", arguments=""
+            ),
+        ),
+        SimpleNamespace(
+            type="response.function_call_arguments.delta",
+            item_id="fc_delta",
+            output_index=0,
+            delta='{"command": "ls"}',
+        ),
+        SimpleNamespace(
+            type="response.output_item.done",
+            output_index=0,
+            item=SimpleNamespace(
+                type="function_call",
+                id="fc_done",
+                call_id="call_1",
+                name="terminal",
+                arguments='{"command": "ls"}',
+                status="completed",
+            ),
+        ),
+        SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(id="resp_1", status="completed", output=None),
+        ),
+    ]
+    final = _consume_codex_event_stream(events, model="gpt-test")
+
+    calls = [item for item in final.output if getattr(item, "type", "") == "function_call"]
+    assert [(call.call_id, call.arguments) for call in calls] == [("call_1", '{"command": "ls"}')]

@@ -964,8 +964,13 @@ class _CodexResponseAssembler:
             announced_sequence, self.next_output_sequence = self.next_output_sequence, self.next_output_sequence + 1
         self.output_indexes.append(_event_field(event, "output_index", announced_index))
         self.output_sequences.append(announced_sequence)
-        # Confirmed by the authoritative done event; never settle it twice.
+        # Confirmed by the authoritative done event; never settle it twice. GitHub Copilot's /responses
+        # gives one item a different ``id`` on each event, so the stable ``call_id`` also confirms it.
         self.pending_function_calls.pop(done_id, None)
+        if done_call_id := _event_field(done_item, "call_id", None):
+            for pending_id, pending in list(self.pending_function_calls.items()):
+                if _event_field(pending["item"], "call_id", None) == done_call_id:
+                    del self.pending_function_calls[pending_id]
         if _message_phase(done_item) == "commentary" and self.on_commentary_message is not None:
             commentary_text = "".join(self.commentary_text_deltas).strip() or _output_text_of(done_item)
             if commentary_text:
