@@ -59,8 +59,9 @@ class _Client:
 
 
 class _RoutingClient:
-    def __init__(self, payloads):
+    def __init__(self, payloads, status_code=200):
         self._payloads = payloads
+        self._status_code = status_code
 
     def __enter__(self):
         return self
@@ -69,7 +70,7 @@ class _RoutingClient:
         return False
 
     def get(self, url, headers=None):
-        return _Response(self._payloads[url])
+        return _Response(self._payloads[url], status_code=self._status_code)
 
 
 def test_fetch_account_usage_codex(monkeypatch):
@@ -242,6 +243,113 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def _ollama_cloud_runtime(**overrides):
+    runtime = {"provider": "ollama-cloud", "base_url": "https://ollama.com/v1", "api_key": "ol-test"}
+    runtime.update(overrides)
+    return lambda requested, explicit_base_url=None, explicit_api_key=None: runtime
+
+
+def test_fetch_account_usage_ollama_cloud_maps_legacy_session_and_weekly_windows(monkeypatch):
+    """Legacy Ollama Cloud plans publish ``remaining_percent`` per window, the inverse of the
+    used percentage every surface renders; both windows carry their own reset."""
+    monkeypatch.setattr("agent.account_usage.resolve_runtime_provider", _ollama_cloud_runtime())
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _RoutingClient(
+            {
+                "https://ollama.com/api/balance": {
+                    "included": {
+                        "session": {"remaining_percent": 75, "resets_at": "2026-10-01T07:00:00Z"},
+                        "weekly": {"remaining_percent": 40, "resets_at": "2026-10-05T00:00:00Z"},
+                    },
+                    "purchased": {"balance_usd": 25},
+                }
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("ollama-cloud")
+
+    assert snapshot is not None
+    assert snapshot.provider == "ollama-cloud"
+    assert snapshot.windows == (
+        AccountUsageWindow(
+            label="Session", used_percent=25.0,
+            reset_at=datetime(2026, 10, 1, 7, 0, tzinfo=timezone.utc), detail="75% remaining",
+        ),
+        AccountUsageWindow(
+            label="Weekly", used_percent=60.0,
+            reset_at=datetime(2026, 10, 5, 0, 0, tzinfo=timezone.utc), detail="40% remaining",
+        ),
+    )
+    assert snapshot.details == ("Purchased credits: $25.00",)
+
+
+def test_fetch_account_usage_ollama_cloud_reports_included_allowance_and_purchased_credits(monkeypatch):
+    """Current plans report a monthly credit allowance instead of session/weekly windows: the
+    window is the share of ``allowance_usd`` spent, resetting when the period rolls over."""
+    monkeypatch.setattr("agent.account_usage.resolve_runtime_provider", _ollama_cloud_runtime())
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _RoutingClient(
+            {
+                "https://ollama.com/api/balance": {
+                    "included": {
+                        "balance_usd": 72.5,
+                        "allowance_usd": 100,
+                        "period": {"from": "2026-09-15T09:30:00Z", "until": "2026-10-15T09:30:00Z"},
+                    },
+                    "purchased": {"balance_usd": 25},
+                }
+            }
+        ),
+    )
+
+    snapshot = fetch_account_usage("ollama-cloud")
+
+    assert snapshot is not None
+    assert len(snapshot.windows) == 1
+    window = snapshot.windows[0]
+    assert window.label == "Included credits"
+    assert window.used_percent == pytest.approx(27.5)
+    assert window.scope == "account"
+    assert window.reset_at == datetime(2026, 10, 15, 9, 30, tzinfo=timezone.utc)
+    assert window.detail == "$72.50 of $100.00 remaining"
+    assert snapshot.details == ("Purchased credits: $25.00",)
+    # The window's detail only renders when it has no reset time, so pin the line the surface
+    # actually prints: label and percentage from the allowance window.
+    assert "Included credits: 72% remaining (28% used)" in " ".join(render_account_usage_lines(snapshot))
+
+
+def test_fetch_account_usage_ollama_cloud_without_key_returns_none(monkeypatch):
+    """A home with no Ollama Cloud credential reports nothing and spends no request."""
+    monkeypatch.setattr("agent.account_usage.resolve_runtime_provider", _ollama_cloud_runtime(api_key=""))
+
+    def _no_fetch(timeout=10.0):
+        raise AssertionError("a keyless provider must not reach the usage API")
+
+    monkeypatch.setattr("agent.account_usage.httpx.Client", _no_fetch)
+
+    assert fetch_account_usage("ollama-cloud") is None
+
+
+def test_fetch_account_usage_ollama_cloud_http_failure_is_swallowed(monkeypatch):
+    """A 429 (the balance endpoint allows 10 requests a minute) fails open at the dispatch: /usage
+    and the picker keep the last snapshot instead of surfacing a traceback."""
+    from agent.account_usage import _fetch_ollama_cloud_account_usage
+
+    monkeypatch.setattr("agent.account_usage.resolve_runtime_provider", _ollama_cloud_runtime())
+    monkeypatch.setattr(
+        "agent.account_usage.httpx.Client",
+        lambda timeout=10.0: _RoutingClient({"https://ollama.com/api/balance": {"included": {}}}, status_code=429),
+    )
+
+    # The fetcher itself propagates the failure; the dispatch is the layer that fails open.
+    with pytest.raises(RuntimeError):
+        _fetch_ollama_cloud_account_usage(None, None)
+    assert fetch_account_usage("ollama-cloud") is None
 
 
 def test_plugin_usage_hook_is_bounded_and_fails_open(monkeypatch):
