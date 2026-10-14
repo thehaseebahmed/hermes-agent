@@ -695,9 +695,54 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     return _snapshot("openrouter", "credits_api", windows, details)
 
 
+def _fetch_ollama_cloud_account_usage(
+    base_url: Optional[str], api_key: Optional[str]
+) -> Optional[AccountUsageSnapshot]:
+    """Ollama Cloud limits from ``GET /api/balance``.
+
+    Current plans report a monthly included-credit allowance (``balance_usd`` of
+    ``allowance_usd``, resetting at ``period.until``); legacy plans report session and weekly
+    ``remaining_percent`` windows instead. Exhausting either caps the whole account, so every
+    window is account-scoped.
+    """
+    runtime = resolve_runtime_provider(requested="ollama-cloud", explicit_base_url=base_url, explicit_api_key=api_key)
+    token = str(runtime.get("api_key", "") or "").strip()
+    if not token:
+        return None
+    # The balance endpoint lives at the server root, while the provider's base URL carries /v1.
+    root = str(runtime.get("base_url", "") or "").rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3].rstrip("/")
+    payload = _get_json(f"{root}/api/balance",
+                        {"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=10.0)
+    included, purchased = payload.get("included") or {}, payload.get("purchased") or {}
+    windows: list[AccountUsageWindow] = []
+    details: list[str] = []
+    for key, label in (("session", "Session"), ("weekly", "Weekly")):
+        window = included.get(key) or {}
+        remaining = window.get("remaining_percent")
+        if not _is_num(remaining):
+            continue
+        value = float(remaining)
+        windows.append(AccountUsageWindow(label=label, used_percent=max(0.0, min(100.0, 100.0 - value)),
+                                         reset_at=_parse_dt(window.get("resets_at")),
+                                         detail=f"{value:.0f}% remaining"))
+    balance, allowance = included.get("balance_usd"), included.get("allowance_usd")
+    if _is_num(balance) and _is_num(allowance) and float(allowance) > 0:
+        balance_value, allowance_value = float(balance), float(allowance)
+        used = min(100.0, max(0.0, (allowance_value - balance_value) / allowance_value * 100))
+        windows.append(AccountUsageWindow(label="Included credits", used_percent=used,
+                                          reset_at=_parse_dt((included.get("period") or {}).get("until")),
+                                          detail=f"${max(0.0, balance_value):.2f} of ${allowance_value:.2f} remaining"))
+    bought = purchased.get("balance_usd")
+    if _is_num(bought) and float(bought) > 0:
+        details.append(f"Purchased credits: ${float(bought):.2f}")
+    return _snapshot("ollama-cloud", "balance_api", windows, details)
+
+
 _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[AccountUsageSnapshot]]] = {
     "openai-codex": _fetch_codex_account_usage, "anthropic": _fetch_anthropic_account_usage,
-    "openrouter": _fetch_openrouter_account_usage,
+    "openrouter": _fetch_openrouter_account_usage, "ollama-cloud": _fetch_ollama_cloud_account_usage,
 }
 
 # Picker per-credential variants: same parsers/fetch shape, but a failure is never repaired by
