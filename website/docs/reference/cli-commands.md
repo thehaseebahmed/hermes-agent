@@ -699,8 +699,8 @@ Subcommands: `add`, `list`, `remove`, `reset`, `priority`, `refresh`, `status`, 
 ## `hermes usage`
 
 The account-limits block of the `/usage` slash command — Codex 5-hour / weekly windows, plan and banked
-resets; Anthropic OAuth windows; OpenRouter credits — without starting a session, so shell scripts and cron
-jobs can read it.
+resets; Anthropic OAuth windows; OpenRouter credits; Ollama Cloud included-credit, session and weekly
+windows — without starting a session, so shell scripts and cron jobs can read it.
 
 ```bash
 hermes usage                          # configured model provider, human-readable block
@@ -710,7 +710,7 @@ hermes usage --json                   # one JSON document on stdout
 
 | Option | Description |
 |--------|-------------|
-| `--provider NAME` | Provider to query (default: the configured `model.provider`). Supported: `openai-codex`, `anthropic`, `openrouter`. |
+| `--provider NAME` | Provider to query (default: the configured `model.provider`). Supported: `openai-codex`, `anthropic`, `openrouter`, `ollama-cloud`. |
 | `--json` | Print one JSON document instead of the human-readable block. |
 
 Credentials resolve exactly as they do for `/usage` in a session with no live agent (the auth store, then
